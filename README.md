@@ -22,3 +22,9 @@ Hallucination filter (CSV list of phrases)
 📺 Web subtitle overlay (OBS-ready via Browser Source)
 
 📝 SRT file generation for recordings
+
+🔧 Requirements
+
+Python 3.10+
+
+Recommended: GPU with CUDA (CPU also supported)
