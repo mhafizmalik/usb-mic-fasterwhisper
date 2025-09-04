@@ -510,37 +510,47 @@ FULL_TRANSCRIPTION_HTML = '''
         
         .empty-state {
             text-align: center;
-            margin-top: 50px;
-            color: #b8c6db;
+            margin-top: 80px;
+            color: #64748b;
         }
         
         .empty-state h3 {
-            margin-bottom: 10px;
-            font-weight: 300;
+            margin-bottom: 12px;
+            font-weight: 600;
+            font-size: 20px;
+            color: #374151;
+        }
+        
+        .empty-state p {
+            font-size: 15px;
+            color: #6b7280;
         }
         
         .stats-bar {
-            background: rgba(0, 0, 0, 0.3);
-            padding: 10px 20px;
-            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            background: #f8fafc;
+            padding: 16px 30px;
+            border-top: 1px solid #e2e8f0;
             display: flex;
             justify-content: space-between;
-            font-size: 12px;
-            color: #b8c6db;
+            font-size: 13px;
+            color: #64748b;
+            font-weight: 500;
         }
         
         /* Auto-scroll indicator */
         .scroll-indicator {
             position: fixed;
-            bottom: 100px;
-            right: 20px;
-            background: rgba(0, 0, 0, 0.8);
+            bottom: 120px;
+            right: 24px;
+            background: #1f2937;
             color: white;
-            padding: 8px 12px;
-            border-radius: 20px;
-            font-size: 12px;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
             opacity: 0;
             transition: opacity 0.3s ease;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
         
         .scroll-indicator.visible {
@@ -549,21 +559,21 @@ FULL_TRANSCRIPTION_HTML = '''
         
         /* Scrollbar styling */
         .transcription-container::-webkit-scrollbar {
-            width: 6px;
+            width: 8px;
         }
         
         .transcription-container::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 3px;
+            background: #f1f5f9;
+            border-radius: 4px;
         }
         
         .transcription-container::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 3px;
+            background: #cbd5e1;
+            border-radius: 4px;
         }
         
         .transcription-container::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.5);
+            background: #94a3b8;
         }
         
         /* Responsive design */
