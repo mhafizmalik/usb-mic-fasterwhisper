@@ -10,8 +10,9 @@ import queue
 import threading
 import io
 import os
+from datetime import datetime
 from typing import Optional
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, jsonify, send_file, request, Response
 from flask_socketio import SocketIO, emit
 import webbrowser
 
@@ -238,9 +239,584 @@ SUBTITLE_HTML = '''
 </html>
 '''
 
-# Web server settings
-WEB_HOST = "0.0.0.0"
-WEB_PORT = 8000
+
+# Add this to your existing DirectFasterWhisperClient class
+class TranscriptionManager:
+    """Manages full transcription history with timestamps"""
+    
+    def __init__(self):
+        self.transcriptions = []  # List of transcription entries
+        self.session_start_time = None
+        self.lock = threading.Lock()
+        
+    def start_session(self):
+        """Start a new transcription session"""
+        with self.lock:
+            self.session_start_time = datetime.now()
+            self.transcriptions = []
+    
+    def add_transcription(self, text: str, confidence: float = 0.0):
+        """Add a new transcription with timestamp"""
+        with self.lock:
+            timestamp = datetime.now()
+            relative_time = (timestamp - self.session_start_time).total_seconds() if self.session_start_time else 0
+            
+            entry = {
+                'id': len(self.transcriptions) + 1,
+                'text': text.strip(),
+                'confidence': confidence,
+                'timestamp': timestamp.isoformat(),
+                'relative_time': relative_time,
+                'formatted_time': timestamp.strftime('%H:%M:%S')
+            }
+            
+            self.transcriptions.append(entry)
+            return entry
+    
+    def get_all_transcriptions(self):
+        """Get all transcriptions"""
+        with self.lock:
+            return self.transcriptions.copy()
+    
+    def get_stats(self):
+        """Get transcription statistics"""
+        with self.lock:
+            total_chars = sum(len(t['text']) for t in self.transcriptions)
+            total_words = sum(len(t['text'].split()) for t in self.transcriptions)
+            duration = (datetime.now() - self.session_start_time).total_seconds() if self.session_start_time else 0
+            
+            return {
+                'total_entries': len(self.transcriptions),
+                'total_characters': total_chars,
+                'total_words': total_words,
+                'session_duration': duration,
+                'session_start': self.session_start_time.isoformat() if self.session_start_time else None
+            }
+    
+    def export_as_text(self):
+        """Export transcriptions as plain text"""
+        with self.lock:
+            if not self.transcriptions:
+                return "No transcriptions available.\n"
+            
+            lines = [
+                f"Transcription Session - {self.session_start_time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                "=" * 60 + "\n\n"
+            ]
+            
+            for entry in self.transcriptions:
+                confidence_text = f" ({entry['confidence']*100:.0f}%)" if entry['confidence'] > 0 else ""
+                lines.append(f"[{entry['formatted_time']}]{confidence_text} {entry['text']}\n")
+            
+            return "".join(lines)
+    
+    def export_as_srt(self):
+        """Export transcriptions as SRT format"""
+        with self.lock:
+            if not self.transcriptions:
+                return ""
+            
+            srt_lines = []
+            
+            for i, entry in enumerate(self.transcriptions):
+                # Calculate start and end times (assume 5 second duration for each entry)
+                start_time = entry['relative_time']
+                end_time = start_time + 5.0  # Default 5 second duration
+                
+                # SRT time format: HH:MM:SS,mmm
+                start_srt = self._seconds_to_srt_time(start_time)
+                end_srt = self._seconds_to_srt_time(end_time)
+                
+                srt_lines.extend([
+                    f"{i + 1}",
+                    f"{start_srt} --> {end_srt}",
+                    entry['text'],
+                    ""  # Blank line
+                ])
+            
+            return "\n".join(srt_lines)
+    
+    def export_as_json(self):
+        """Export transcriptions as JSON"""
+        with self.lock:
+            return json.dumps({
+                'session_info': self.get_stats(),
+                'transcriptions': self.transcriptions
+            }, indent=2)
+    
+    def _seconds_to_srt_time(self, seconds):
+        """Convert seconds to SRT time format"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        milliseconds = int((seconds % 1) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+# Enhanced HTML templates
+FULL_TRANSCRIPTION_HTML = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Transcription - Full View</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 300;
+        }
+        
+        .header-stats {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+            color: #b8c6db;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-1px);
+        }
+        
+        .btn-download {
+            background: rgba(46, 125, 50, 0.8);
+        }
+        
+        .btn-clear {
+            background: rgba(211, 47, 47, 0.8);
+        }
+        
+        .status {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status.connected {
+            background: rgba(46, 125, 50, 0.8);
+        }
+        
+        .status.disconnected {
+            background: rgba(211, 47, 47, 0.8);
+        }
+        
+        .main-content {
+            height: calc(100vh - 80px);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .transcription-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            scroll-behavior: smooth;
+        }
+        
+        .transcription-entry {
+            background: rgba(255, 255, 255, 0.1);
+            margin-bottom: 12px;
+            padding: 15px;
+            border-radius: 12px;
+            border-left: 4px solid #4fc3f7;
+            backdrop-filter: blur(5px);
+            opacity: 0;
+            transform: translateY(20px);
+            animation: slideIn 0.5s ease forwards;
+        }
+        
+        .transcription-entry:last-child {
+            border-left-color: #81c784;
+            box-shadow: 0 4px 20px rgba(129, 199, 132, 0.3);
+        }
+        
+        @keyframes slideIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .entry-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #b8c6db;
+        }
+        
+        .entry-time {
+            font-weight: 500;
+        }
+        
+        .entry-confidence {
+            margin-left: auto;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        
+        .entry-text {
+            font-size: 16px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+        
+        .empty-state {
+            text-align: center;
+            margin-top: 50px;
+            color: #b8c6db;
+        }
+        
+        .empty-state h3 {
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+        
+        .stats-bar {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #b8c6db;
+        }
+        
+        /* Auto-scroll indicator */
+        .scroll-indicator {
+            position: fixed;
+            bottom: 100px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .scroll-indicator.visible {
+            opacity: 1;
+        }
+        
+        /* Scrollbar styling */
+        .transcription-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .transcription-container::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        
+        .transcription-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+        }
+        
+        .transcription-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
+        }
+        
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .header-stats {
+                justify-content: center;
+            }
+            
+            .controls {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Live Transcription</h1>
+            <div class="header-stats">
+                <span id="session-duration">Session: 00:00:00</span>
+                <span id="total-entries">Entries: 0</span>
+                <span id="total-words">Words: 0</span>
+            </div>
+        </div>
+        <div class="controls">
+            <div id="connection-status" class="status disconnected">Disconnected</div>
+            <a href="/download/text" class="btn btn-download" target="_blank">📄 Text</a>
+            <a href="/download/srt" class="btn btn-download" target="_blank">📺 SRT</a>
+            <a href="/download/json" class="btn btn-download" target="_blank">📊 JSON</a>
+            <button class="btn btn-clear" onclick="clearTranscriptions()">🗑️ Clear</button>
+            <button class="btn" onclick="toggleAutoScroll()">📜 Auto-scroll: <span id="autoscroll-status">ON</span></button>
+        </div>
+    </div>
+    
+    <div class="main-content">
+        <div class="transcription-container" id="transcription-container">
+            <div class="empty-state" id="empty-state">
+                <h3>Waiting for transcriptions...</h3>
+                <p>Start speaking to see live transcriptions appear here</p>
+            </div>
+        </div>
+        
+        <div class="stats-bar">
+            <span>Real-time Speech Recognition</span>
+            <span id="last-update">Last update: Never</span>
+        </div>
+    </div>
+    
+    <div class="scroll-indicator" id="scroll-indicator">
+        Auto-scrolling to latest transcription
+    </div>
+
+    <script>
+        const socket = io();
+        const container = document.getElementById('transcription-container');
+        const emptyState = document.getElementById('empty-state');
+        const connectionStatus = document.getElementById('connection-status');
+        const scrollIndicator = document.getElementById('scroll-indicator');
+        
+        let autoScroll = true;
+        let transcriptions = [];
+        let sessionStartTime = null;
+        let statsInterval = null;
+        
+        // Socket event handlers
+        socket.on('connect', function() {
+            console.log('Connected to transcription server');
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.className = 'status connected';
+            
+            // Request current transcriptions
+            socket.emit('request_full_transcription');
+        });
+        
+        socket.on('disconnect', function() {
+            console.log('Disconnected from transcription server');
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.className = 'status disconnected';
+        });
+        
+        socket.on('new_transcription', function(data) {
+            console.log('New transcription received:', data);
+            addTranscription(data);
+            updateStats();
+            updateLastUpdate();
+        });
+        
+        socket.on('full_transcription', function(data) {
+            console.log('Full transcription received:', data);
+            transcriptions = data.transcriptions || [];
+            sessionStartTime = data.session_start ? new Date(data.session_start) : new Date();
+            renderAllTranscriptions();
+            updateStats();
+            startStatsTimer();
+        });
+        
+        socket.on('transcription_cleared', function() {
+            console.log('Transcriptions cleared');
+            transcriptions = [];
+            renderAllTranscriptions();
+            updateStats();
+        });
+        
+        // Transcription management
+        function addTranscription(data) {
+            transcriptions.push(data);
+            
+            // Remove empty state if present
+            if (emptyState.style.display !== 'none') {
+                emptyState.style.display = 'none';
+            }
+            
+            // Create and add transcription entry
+            const entry = createTranscriptionEntry(data);
+            container.appendChild(entry);
+            
+            // Auto-scroll to bottom if enabled
+            if (autoScroll) {
+                scrollToBottom();
+            }
+        }
+        
+        function createTranscriptionEntry(data) {
+            const entry = document.createElement('div');
+            entry.className = 'transcription-entry';
+            entry.dataset.id = data.id;
+            
+            const confidenceText = data.confidence > 0 ? 
+                `<span class="entry-confidence">${(data.confidence * 100).toFixed(0)}%</span>` : '';
+            
+            entry.innerHTML = `
+                <div class="entry-header">
+                    <span class="entry-time">${data.formatted_time || new Date().toLocaleTimeString()}</span>
+                    ${confidenceText}
+                </div>
+                <div class="entry-text">${escapeHtml(data.text)}</div>
+            `;
+            
+            return entry;
+        }
+        
+        function renderAllTranscriptions() {
+            // Clear container
+            container.innerHTML = '';
+            
+            if (transcriptions.length === 0) {
+                container.appendChild(emptyState);
+                emptyState.style.display = 'block';
+                return;
+            }
+            
+            emptyState.style.display = 'none';
+            
+            // Add all transcriptions
+            transcriptions.forEach(data => {
+                const entry = createTranscriptionEntry(data);
+                container.appendChild(entry);
+            });
+            
+            // Scroll to bottom
+            if (autoScroll) {
+                scrollToBottom();
+            }
+        }
+        
+        // Utility functions
+        function scrollToBottom() {
+            container.scrollTop = container.scrollHeight;
+            showScrollIndicator();
+        }
+        
+        function showScrollIndicator() {
+            scrollIndicator.classList.add('visible');
+            setTimeout(() => {
+                scrollIndicator.classList.remove('visible');
+            }, 2000);
+        }
+        
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            document.getElementById('autoscroll-status').textContent = autoScroll ? 'ON' : 'OFF';
+            
+            if (autoScroll) {
+                scrollToBottom();
+            }
+        }
+        
+        function clearTranscriptions() {
+            if (confirm('Are you sure you want to clear all transcriptions?')) {
+                socket.emit('clear_transcriptions');
+            }
+        }
+        
+        function updateStats() {
+            const totalEntries = transcriptions.length;
+            const totalWords = transcriptions.reduce((sum, t) => sum + t.text.split(' ').length, 0);
+            
+            document.getElementById('total-entries').textContent = `Entries: ${totalEntries}`;
+            document.getElementById('total-words').textContent = `Words: ${totalWords}`;
+        }
+        
+        function updateSessionDuration() {
+            if (!sessionStartTime) return;
+            
+            const now = new Date();
+            const duration = Math.floor((now - sessionStartTime) / 1000);
+            const hours = Math.floor(duration / 3600);
+            const minutes = Math.floor((duration % 3600) / 60);
+            const seconds = duration % 60;
+            
+            document.getElementById('session-duration').textContent = 
+                `Session: ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+        
+        function updateLastUpdate() {
+            document.getElementById('last-update').textContent = 
+                `Last update: ${new Date().toLocaleTimeString()}`;
+        }
+        
+        function startStatsTimer() {
+            if (statsInterval) clearInterval(statsInterval);
+            statsInterval = setInterval(updateSessionDuration, 1000);
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Auto-scroll detection
+        container.addEventListener('scroll', function() {
+            const isAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 10;
+            
+            if (!isAtBottom && autoScroll) {
+                // User scrolled up, temporarily disable auto-scroll
+                setTimeout(() => {
+                    if (autoScroll) scrollToBottom();
+                }, 3000);
+            }
+        });
+        
+        // Initialize
+        updateStats();
+    </script>
+</body>
+</html>
+'''
 
 class HallucinationDetector:
     """Detects and filters out hallucinated phrases using Aho-Corasick algorithm."""
@@ -1026,6 +1602,127 @@ class DirectFasterWhisperClient:
             else:
                 raise ValueError(f"Invalid device string: '{device_index}'")
         return device_index
+    def enhanced_setup_web_server(self, host=WEB_HOST, port=WEB_PORT):
+        """Enhanced web server setup with full transcription view"""
+        if not FLASK_AVAILABLE:
+            logger.warning("Flask not available, skipping web server setup")
+            return False
+
+        try:
+            # Initialize transcription manager
+            self.transcription_manager = TranscriptionManager()
+            self.transcription_manager.start_session()
+
+            self.flask_app = Flask(__name__)
+            self.flask_app.config['SECRET_KEY'] = 'whisper_subtitles_secret'
+
+            # Disable Flask logging to avoid cluttering output
+            logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+            self.socketio = SocketIO(
+                self.flask_app,
+                cors_allowed_origins="*",
+                logger=False,
+                engineio_logger=False
+            )
+
+            # Routes
+            @self.flask_app.route('/')
+            def index():
+                return render_template_string(SUBTITLE_HTML)  # Your original subtitle view
+
+            @self.flask_app.route('/full')
+            def full_transcription():
+                return render_template_string(FULL_TRANSCRIPTION_HTML)
+
+            @self.flask_app.route('/api/transcriptions')
+            def api_transcriptions():
+                return jsonify({
+                    'transcriptions': self.transcription_manager.get_all_transcriptions(),
+                    'stats': self.transcription_manager.get_stats()
+                })
+
+            @self.flask_app.route('/download/<format>')
+            def download_transcription(format):
+                if format not in ['text', 'srt', 'json']:
+                    return "Invalid format", 400
+
+                if format == 'text':
+                    content = self.transcription_manager.export_as_text()
+                    mimetype = 'text/plain'
+                    filename = f'transcription_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+                elif format == 'srt':
+                    content = self.transcription_manager.export_as_srt()
+                    mimetype = 'text/plain'
+                    filename = f'transcription_{datetime.now().strftime("%Y%m%d_%H%M%S")}.srt'
+                elif format == 'json':
+                    content = self.transcription_manager.export_as_json()
+                    mimetype = 'application/json'
+                    filename = f'transcription_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+
+                # Create file-like object
+                file_obj = io.BytesIO(content.encode('utf-8'))
+                file_obj.seek(0)
+
+                return send_file(
+                    file_obj,
+                    mimetype=mimetype,
+                    as_attachment=True,
+                    download_name=filename
+                )
+
+            # Socket event handlers
+            @self.socketio.on('connect')
+            def handle_connect():
+                logger.info("Web client connected")
+                emit('subtitle', {'text': 'Connected to live subtitles', 'confidence': 0})
+
+            @self.socketio.on('disconnect')
+            def handle_disconnect():
+                logger.info("Web client disconnected")
+
+            @self.socketio.on('request_full_transcription')
+            def handle_request_full():
+                transcriptions = self.transcription_manager.get_all_transcriptions()
+                stats = self.transcription_manager.get_stats()
+                emit('full_transcription', {
+                    'transcriptions': transcriptions,
+                    'session_start': stats['session_start'],
+                    'stats': stats
+                })
+
+            @self.socketio.on('clear_transcriptions')
+            def handle_clear_transcriptions():
+                self.transcription_manager.start_session()  # Reset session
+                emit('transcription_cleared', broadcast=True)
+
+            logger.info(f"Enhanced web server setup complete on http://{host}:{port}")
+            logger.info(f"Full transcription view: http://{host}:{port}/full")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to setup enhanced web server: {e}")
+            return False
+
+    def enhanced_send_subtitle(self, text, confidence=0.0):
+        """Enhanced subtitle sending with transcription management"""
+        if self.socketio:
+            try:
+                # Add to transcription manager
+                entry = self.transcription_manager.add_transcription(text, confidence)
+
+                # Send to subtitle view (original functionality)
+                self.socketio.emit('subtitle', {
+                    'text': text,
+                    'confidence': confidence,
+                    'timestamp': time.time()
+                })
+
+                # Send to full transcription view
+                self.socketio.emit('new_transcription', entry)
+
+            except Exception as e:
+                logger.debug(f"Error sending enhanced subtitle: {e}")
 
     def setup_web_server(self, host=WEB_HOST, port=WEB_PORT):
         """Setup Flask web server with SocketIO for live subtitles."""
@@ -1262,7 +1959,7 @@ class DirectFasterWhisperClient:
                     print(console_output)
                     
                     # Send to web interface for subtitles (only if passed all filters)
-                    self.send_subtitle(result['text'], result['confidence'])
+                    self.enhanced_send_subtitle(result['text'], result['confidence'])
                     
                     # Add to SRT subtitle file
                     self.srt_generator.add_subtitle(result['text'], result['duration'])
@@ -1409,7 +2106,7 @@ class DirectFasterWhisperClient:
 
         # Setup and start web server if enabled
         if enable_web:
-            if self.setup_web_server():
+            if self.enhanced_setup_web_server():
                 if self.start_web_server():
                     logger.info(f"Subtitle interface available at: http://localhost:{WEB_PORT}")
                     logger.info("Use this URL as a Browser Source in OBS Studio")
